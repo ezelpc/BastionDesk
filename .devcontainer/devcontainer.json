@@ -1,0 +1,63 @@
+{
+    "name": "Appointly — MERN Dev Environment",
+
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+
+    "postCreateCommand": "bash .devcontainer/bootstrap.sh",
+
+    // Puertos del stack
+    "forwardPorts": [
+        3000,   // React (Vite)
+        5000,   // Express API
+        27017   // MongoDB
+    ],
+
+    "portsAttributes": {
+        "3000": { "label": "React Client" },
+        "5000": { "label": "Express API" },
+        "27017": { "label": "MongoDB" }
+    },
+
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                // TypeScript / JavaScript
+                "dbaeumer.vscode-eslint",
+                "esbenp.prettier-vscode",
+                "ms-vscode.vscode-typescript-next",
+
+                // Node / Express
+                "christian-kohler.npm-intellisense",
+                "eg2.vscode-npm-script",
+
+                // MongoDB
+                "mongodb.mongodb-vscode",
+
+                // React
+                "dsznajder.es7-react-js-snippets",
+                "bradlc.vscode-tailwindcss",
+
+                // Git
+                "eamodio.gitlens",
+                "github.vscode-github-actions",
+
+                // Utilidades
+                "ms-azuretools.vscode-docker",
+                "redhat.vscode-yaml",
+                "mikestead.dotenv",
+                "humao.rest-client"
+            ],
+            "settings": {
+                "editor.formatOnSave": true,
+                "editor.defaultFormatter": "esbenp.prettier-vscode",
+                "editor.tabSize": 2,
+                "typescript.preferences.importModuleSpecifier": "relative",
+                "terminal.integrated.defaultProfile.linux": "bash"
+            }
+        }
+    },
+
+    "remoteUser": "vscode"
+}
