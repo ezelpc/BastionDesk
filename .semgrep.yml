@@ -1,0 +1,25 @@
+# BastionDesk — Semgrep SAST Configuration
+rules:
+  # Use the official Node.js + React rulesets
+  - id: no-eval
+    pattern: eval(...)
+    message: "Avoid using eval() — security risk"
+    languages: [javascript, typescript]
+    severity: ERROR
+
+  - id: no-console-log-in-prod
+    pattern: console.log(...)
+    message: "Remove console.log before production"
+    languages: [javascript, typescript]
+    severity: WARNING
+
+  - id: hardcoded-secret-key
+    patterns:
+      - pattern: |
+          const $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(secret|password|token|api_key|apikey)
+    message: "Possible hardcoded secret in variable '$VAR'"
+    languages: [javascript, typescript]
+    severity: ERROR

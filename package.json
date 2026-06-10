@@ -1,5 +1,5 @@
 {
-  "name": "bastionbook",
+  "name": "bastiondesk",
   "version": "0.1.0",
   "description": "Plataforma de agendamiento para profesionales y oficios",
   "private": true,
@@ -8,7 +8,15 @@
     "build": "npm run build --prefix server && npm run build --prefix client",
     "install:all": "npm install && npm install --prefix server && npm install --prefix client",
     "server": "npm run dev --prefix server",
-    "client": "npm run dev --prefix client"
+    "client": "npm run dev --prefix client",
+
+    "sec:scan:secrets": "gitleaks detect --source=. -v --no-git",
+    "sec:scan:sast": "semgrep --config=auto --exclude=node_modules .",
+    "sec:scan:deps": "trivy fs --scanners vuln --exit-code 0 .",
+    "sec:scan:container": "trivy image --exit-code 0 $(docker inspect --format='{{.Image}}' bastiondesk-dev 2>/dev/null || echo 'bastiondesk-dev') 2>/dev/null || echo '[!] Container not running — skipping image scan'",
+    "sec:scan": "concurrently --names \"SECRETS,SAST,DEPS\" --prefix-colors \"red,yellow,blue\" \"npm run sec:scan:secrets\" \"npm run sec:scan:sast\" \"npm run sec:scan:deps\"",
+    "sec:audit": "npm audit --audit-level=moderate",
+    "sec:audit:fix": "npm audit fix"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

@@ -1,0 +1,18 @@
+title = "BastionDesk — Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+description = "Custom: Block hardcoded MongoDB credentials"
+id = "bastiondesk-mongo-creds"
+regex = '''mongodb(\+srv)?://[a-zA-Z0-9_-]+:[^@\s]+@'''
+tags = ["secret", "mongodb"]
+
+[allowlist]
+description = "Allowlist for test/example files"
+paths = [
+    '''\.env\.example$''',
+    '''\.devcontainer/''',
+    '''README\.md$'''
+]
