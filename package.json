@@ -1,0 +1,16 @@
+{
+  "name": "bastionbook",
+  "version": "0.1.0",
+  "description": "Plataforma de agendamiento para profesionales y oficios",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names \"API,CLIENT\" --prefix-colors \"cyan,magenta\" \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm run build --prefix server && npm run build --prefix client",
+    "install:all": "npm install && npm install --prefix server && npm install --prefix client",
+    "server": "npm run dev --prefix server",
+    "client": "npm run dev --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
