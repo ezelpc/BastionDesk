@@ -42,6 +42,30 @@ const fs   = require('fs');
 const path = require('path');
 
 // ──────────────────────────────────────────────────────────────
+// Carga automática de server/.env cuando se corre localmente
+// (en GitHub Actions las vars vienen de Secrets, no de .env)
+// ──────────────────────────────────────────────────────────────
+
+if (!IS_GITHUB_ACTIONS) {
+  const serverEnvPath = path.join(__dirname, '../server/.env');
+  if (fs.existsSync(serverEnvPath)) {
+    const lines = fs.readFileSync(serverEnvPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      const val = trimmed.slice(eqIdx + 1).trim();
+      // No sobreescribir vars ya definidas en el entorno del proceso
+      if (key && !(key in process.env)) {
+        process.env[key] = val;
+      }
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // Carga dinámica desde .env.example
 // ──────────────────────────────────────────────────────────────
 
