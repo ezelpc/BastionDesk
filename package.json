@@ -9,7 +9,6 @@
     "install:all": "npm install && npm install --prefix server && npm install --prefix client",
     "server": "npm run dev --prefix server",
     "client": "npm run dev --prefix client",
-
     "sec:scan:secrets": "gitleaks detect --source=. -v --no-git",
     "sec:scan:sast": "semgrep --config=auto --exclude=node_modules .",
     "sec:scan:deps": "trivy fs --scanners vuln --exit-code 0 .",
@@ -17,12 +16,13 @@
     "sec:scan": "concurrently --names \"SECRETS,SAST,DEPS\" --prefix-colors \"red,yellow,blue\" \"npm run sec:scan:secrets\" \"npm run sec:scan:sast\" \"npm run sec:scan:deps\"",
     "sec:audit": "npm audit --audit-level=moderate",
     "sec:audit:fix": "npm audit fix",
-
     "env:validate": "node scripts/validate-env.js",
     "env:validate:strict": "cross-env STRICT_MODE=true node scripts/validate-env.js",
-    "env:setup": "cp -n server/.env.example server/.env 2>/dev/null || true && cp -n client/.env.example client/.env 2>/dev/null || true && echo '✅ .env files created — edit them with your values'"
+    "env:setup": "cp -n server/.env.example server/.env 2>/dev/null || true && cp -n client/.env.example client/.env 2>/dev/null || true && echo '✅ .env files created — edit them with your values'",
+    "prepare": "husky"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "husky": "^9.1.7"
   }
 }

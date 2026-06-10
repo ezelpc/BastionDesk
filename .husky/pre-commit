@@ -1,0 +1,8 @@
+#!/bin/sh
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "🔍 Running Gitleaks local scan..."
+  gitleaks protect --staged --verbose
+else
+  echo "⚠️  Gitleaks is not installed locally. Skipping secret protection scan."
+  echo "   (Install from: https://github.com/gitleaks/gitleaks)"
+fi

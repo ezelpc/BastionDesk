@@ -2,166 +2,301 @@
 /**
  * BastionDesk — Environment Variables Validator
  *
- * Verifica que todas las variables de entorno requeridas
- * estén definidas y no estén vacías.
+ * Modos de operación:
+ *
+ *   NORMAL (default)
+ *     Variables críticas faltantes → ERROR (bloquea pipeline)
+ *     Variables requeridas faltantes → WARNING (no bloquea)
+ *
+ *   STRICT  (STRICT_MODE=true)
+ *     Cualquier variable faltante → ERROR
+ *
+ *   BOOTSTRAP (auto-detectado)
+ *     Se activa cuando corre en GitHub Actions y NINGÚN secret
+ *     crítico está configurado aún. Reporta todo como WARNING
+ *     y sugiere el siguiente paso de configuración.
+ *     También activable con BOOTSTRAP_MODE=true.
  *
  * Uso:
- *   node scripts/validate-env.js              # modo normal
- *   STRICT_MODE=true node scripts/validate-env.js  # falla si alguna está vacía
+ *   node scripts/validate-env.js
+ *   STRICT_MODE=true node scripts/validate-env.js
+ *   BOOTSTRAP_MODE=true node scripts/validate-env.js
  *
  * Usado por:
- *   - GitHub Actions (ci-devsecops.yml)
- *   - GitHub Actions (env-validation.yml)
+ *   - GitHub Actions (ci-devsecops.yml, env-validation.yml)
  *   - Jenkinsfile
+ *   - Desarrollo local: npm run env:validate
  */
 
 'use strict';
 
-const STRICT_MODE = process.env.STRICT_MODE === 'true';
-
 // ──────────────────────────────────────────────────────────────
-// Definición de variables requeridas
+// Modo de operación
 // ──────────────────────────────────────────────────────────────
 
-/**
- * Variables CRÍTICAS — pipeline falla si están ausentes o vacías
- * independientemente del modo
- */
-const CRITICAL = [
-  { key: 'JWT_SECRET',          description: 'Clave secreta JWT — mín. 32 chars' },
-  { key: 'JWT_REFRESH_SECRET',  description: 'Clave secreta JWT Refresh — mín. 32 chars' },
-  { key: 'MONGODB_URI',         description: 'URI de conexión a MongoDB' },
-];
+const IS_GITHUB_ACTIONS = process.env.GITHUB_ACTIONS === 'true';
+const STRICT_MODE       = process.env.STRICT_MODE    === 'true';
+const FORCE_BOOTSTRAP   = process.env.BOOTSTRAP_MODE === 'true';
 
-/**
- * Variables REQUERIDAS — pipeline falla si no existen
- * En modo estricto también falla si están vacías
- */
-const REQUIRED = [
-  // Servidor
-  { key: 'PORT',                  description: 'Puerto del servidor Express',         default: '5000' },
-  { key: 'NODE_ENV',              description: 'Entorno de Node.js',                  default: 'development' },
-  { key: 'CLIENT_URL',            description: 'URL del cliente para CORS',           default: 'http://localhost:3000' },
-
-  // MongoDB
-  { key: 'MONGODB_URI_TEST',      description: 'URI de MongoDB para tests' },
-
-  // JWT
-  { key: 'JWT_EXPIRES_IN',        description: 'Expiración del JWT',                  default: '7d' },
-  { key: 'JWT_REFRESH_EXPIRES_IN', description: 'Expiración del JWT Refresh',         default: '30d' },
-
-  // Email
-  { key: 'RESEND_API_KEY',        description: 'API Key de Resend (email)' },
-
-  // SMS
-  { key: 'TWILIO_ACCOUNT_SID',    description: 'Twilio Account SID' },
-  { key: 'TWILIO_AUTH_TOKEN',     description: 'Twilio Auth Token' },
-  { key: 'TWILIO_PHONE_NUMBER',   description: 'Número de Twilio' },
-
-  // Maps
-  { key: 'GOOGLE_MAPS_API_KEY',   description: 'Google Maps API Key' },
-
-  // Cloudinary
-  { key: 'CLOUDINARY_CLOUD_NAME', description: 'Cloudinary Cloud Name' },
-  { key: 'CLOUDINARY_API_KEY',    description: 'Cloudinary API Key' },
-  { key: 'CLOUDINARY_API_SECRET', description: 'Cloudinary API Secret' },
-
-  // Cliente (Vite)
-  { key: 'VITE_API_URL',          description: 'URL de la API para el cliente Vite' },
-  { key: 'VITE_GOOGLE_MAPS_KEY',  description: 'Google Maps Key para el cliente' },
-];
+const fs   = require('fs');
+const path = require('path');
 
 // ──────────────────────────────────────────────────────────────
-// Utilidades
+// Carga dinámica desde .env.example
+// ──────────────────────────────────────────────────────────────
+
+const SERVER_ENV_EX = path.join(__dirname, '../server/.env.example');
+const CLIENT_ENV_EX = path.join(__dirname, '../client/.env.example');
+
+const CRITICAL_KEYS = new Set(['JWT_SECRET', 'JWT_REFRESH_SECRET', 'MONGODB_URI']);
+
+const KEY_DESCRIPTIONS = {
+  JWT_SECRET: 'Clave secreta JWT (mín. 32 chars)',
+  JWT_REFRESH_SECRET: 'Clave secreta JWT Refresh (mín. 32 chars)',
+  MONGODB_URI: 'URI de conexión a MongoDB',
+  PORT: 'Puerto del servidor Express',
+  NODE_ENV: 'Entorno de Node.js',
+  CLIENT_URL: 'URL del cliente para CORS',
+  MONGODB_URI_TEST: 'URI de MongoDB para tests',
+  JWT_EXPIRES_IN: 'Tiempo de expiración del JWT',
+  JWT_REFRESH_EXPIRES_IN: 'Tiempo de expiración del Refresh',
+  RESEND_API_KEY: 'API Key de Resend (email)',
+  TWILIO_ACCOUNT_SID: 'Twilio Account SID',
+  TWILIO_AUTH_TOKEN: 'Twilio Auth Token',
+  TWILIO_PHONE_NUMBER: 'Número de teléfono Twilio',
+  GOOGLE_MAPS_API_KEY: 'Google Maps API Key',
+  CLOUDINARY_CLOUD_NAME: 'Cloudinary Cloud Name',
+  CLOUDINARY_API_KEY: 'Cloudinary API Key',
+  CLOUDINARY_API_SECRET: 'Cloudinary API Secret',
+  VITE_API_URL: 'URL de la API para el cliente Vite',
+  VITE_GOOGLE_MAPS_KEY: 'Google Maps Key para el frontend'
+};
+
+const CRITICAL = [];
+const REQUIRED = [];
+
+function loadFromEnvExample(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const content = fs.readFileSync(filePath, 'utf8');
+  const lines = content.split(/\r?\n/);
+  
+  let currentSection = '';
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    if (line.startsWith('#')) {
+      currentSection = line.replace(/^#\s*/, '').trim();
+      continue;
+    }
+    
+    const parts = line.split('=');
+    if (parts.length >= 1) {
+      const key = parts[0].trim();
+      if (!key || key.startsWith('#')) continue;
+      
+      const defaultValue = parts.slice(1).join('=').trim();
+      const cleanDefault = defaultValue === '' ? undefined : defaultValue;
+      
+      // Intentar obtener descripción de KEY_DESCRIPTIONS, si no, del nombre de sección, si no, fallback
+      const description = KEY_DESCRIPTIONS[key] || 
+                          (currentSection ? `${currentSection} variable` : `Variable ${key}`);
+
+      const variableDef = {
+        key,
+        description,
+        default: cleanDefault
+      };
+      
+      if (CRITICAL_KEYS.has(key)) {
+        CRITICAL.push({ key, description });
+      } else {
+        REQUIRED.push(variableDef);
+      }
+    }
+  }
+}
+
+loadFromEnvExample(SERVER_ENV_EX);
+loadFromEnvExample(CLIENT_ENV_EX);
+
+// ──────────────────────────────────────────────────────────────
+// Utilidades de color
 // ──────────────────────────────────────────────────────────────
 
 const GREEN  = '\x1b[32m';
 const YELLOW = '\x1b[33m';
 const RED    = '\x1b[31m';
-const BLUE   = '\x1b[34m';
+const CYAN   = '\x1b[36m';
 const RESET  = '\x1b[0m';
 const BOLD   = '\x1b[1m';
+const DIM    = '\x1b[2m';
 
-function ok(msg)   { console.log(`  ${GREEN}✅ ${msg}${RESET}`); }
-function warn(msg) { console.warn(`  ${YELLOW}⚠️  ${msg}${RESET}`); }
-function err(msg)  { console.error(`  ${RED}❌ ${msg}${RESET}`); }
-function info(msg) { console.log(`${BLUE}${msg}${RESET}`); }
-function header(msg) { console.log(`\n${BOLD}${msg}${RESET}`); }
+const ok     = (msg) => console.log(`  ${GREEN}✅ ${msg}${RESET}`);
+const warn   = (msg) => console.warn(`  ${YELLOW}⚠️  ${msg}${RESET}`);
+const err    = (msg) => console.error(`  ${RED}❌ ${msg}${RESET}`);
+const header = (msg) => console.log(`\n${BOLD}${msg}${RESET}`);
+const hint   = (msg) => console.log(`  ${DIM}   ${msg}${RESET}`);
+
+// ──────────────────────────────────────────────────────────────
+// Detectar modo bootstrap automáticamente
+// Si corremos en GitHub Actions y TODOS los críticos están vacíos
+// → es un setup inicial, no una configuración parcial rota
+// ──────────────────────────────────────────────────────────────
+
+function detectBootstrap() {
+  if (FORCE_BOOTSTRAP) return true;
+  if (!IS_GITHUB_ACTIONS) return false;
+
+  // Bootstrap solo si NINGÚN secret crítico está configurado
+  const allCriticalEmpty = CRITICAL.every(({ key }) => {
+    const val = process.env[key];
+    return !val || val.trim() === '';
+  });
+
+  // Si al menos uno está configurado, NO es bootstrap
+  // (podría ser una configuración parcial rota → error real)
+  return allCriticalEmpty;
+}
+
+const BOOTSTRAP_MODE = detectBootstrap();
+
+// ──────────────────────────────────────────────────────────────
+// Determinar el modo activo
+// ──────────────────────────────────────────────────────────────
+
+let MODE_LABEL;
+if (BOOTSTRAP_MODE) {
+  MODE_LABEL = 'BOOTSTRAP';
+} else if (STRICT_MODE) {
+  MODE_LABEL = 'STRICT  ';
+} else {
+  MODE_LABEL = 'NORMAL  ';
+}
 
 // ──────────────────────────────────────────────────────────────
 // Validación
 // ──────────────────────────────────────────────────────────────
 
-let errors = 0;
+let errors   = 0;
 let warnings = 0;
+
+const PLACEHOLDERS = ['your_', 'changeme', 'placeholder', 'example', 'replace_me', 'todo'];
+const isPlaceholder = (val) => PLACEHOLDERS.some(p => val.toLowerCase().includes(p));
 
 console.log(`
 ╔══════════════════════════════════════════════════╗
 ║     BastionDesk — Environment Variable Check     ║
-║     Mode: ${STRICT_MODE ? 'STRICT' : 'NORMAL '}                              ║
-╚══════════════════════════════════════════════════╝
-`);
+║     Mode: ${MODE_LABEL}                              ║
+╚══════════════════════════════════════════════════╝`);
 
-// -- CRITICAL CHECK --
+if (BOOTSTRAP_MODE) {
+  console.log(`
+${YELLOW}${BOLD}  ⚡ Bootstrap mode detected — no secrets configured yet.${RESET}
+${YELLOW}  This is expected on first run. Configure GitHub Secrets at:${RESET}
+${CYAN}  → github.com/<org>/<repo>/settings/secrets/actions${RESET}
+`);
+}
+
+// ── Critical Variables ──────────────────────────────────────
 header('🔴 Critical Variables');
+
 for (const { key, description } of CRITICAL) {
   const val = process.env[key];
-  if (!val || val.trim() === '') {
-    err(`${key} — ${description} — MISSING or EMPTY`);
-    errors++;
-  } else if (val.includes('your_') || val.includes('changeme') || val.includes('placeholder')) {
-    err(`${key} — Contains a placeholder value — Replace with real secret`);
+  const empty = !val || val.trim() === '';
+
+  if (empty) {
+    if (BOOTSTRAP_MODE) {
+      warn(`${key} — NOT CONFIGURED`);
+      hint(`${description}`);
+      warnings++;
+    } else {
+      err(`${key} — ${description} — MISSING or EMPTY`);
+      hint(`Set it in GitHub Settings → Secrets → Actions  (or Jenkins credentials)`);
+      errors++;
+    }
+  } else if (isPlaceholder(val)) {
+    // Placeholder siempre es error, incluso en bootstrap
+    err(`${key} — Contains a placeholder value — Replace with a real secret`);
+    hint(`Current value starts with: "${val.substring(0, 20)}..."`);
     errors++;
   } else {
     ok(`${key} — ${description}`);
   }
 }
 
-// -- REQUIRED CHECK --
+// Validaciones de formato para vars críticas presentes
+const jwtSecret = process.env.JWT_SECRET;
+if (jwtSecret && jwtSecret.trim() && !isPlaceholder(jwtSecret) && jwtSecret.length < 32) {
+  err(`JWT_SECRET — Too short (${jwtSecret.length} chars) — Minimum is 32 characters`);
+  errors++;
+}
+
+const jwtRefresh = process.env.JWT_REFRESH_SECRET;
+if (jwtRefresh && jwtRefresh.trim() && !isPlaceholder(jwtRefresh) && jwtRefresh.length < 32) {
+  err(`JWT_REFRESH_SECRET — Too short (${jwtRefresh.length} chars) — Minimum is 32 characters`);
+  errors++;
+}
+
+const mongoUri = process.env.MONGODB_URI;
+if (mongoUri && mongoUri.trim() && !isPlaceholder(mongoUri) && !/^mongodb(\+srv)?:\/\/.+/.test(mongoUri)) {
+  err(`MONGODB_URI — Invalid format — Must start with mongodb:// or mongodb+srv://`);
+  errors++;
+}
+
+// ── Required Variables ──────────────────────────────────────
 header('🟡 Required Variables');
+
 for (const { key, description, default: def } of REQUIRED) {
   const val = process.env[key];
+  const empty = !val || val.trim() === '';
 
-  if (!val || val.trim() === '') {
-    if (def) {
-      if (STRICT_MODE) {
-        err(`${key} — ${description} — EMPTY (strict mode: must be explicitly set)`);
-        errors++;
-      } else {
-        warn(`${key} — ${description} — EMPTY (using default: ${def})`);
-        warnings++;
-      }
+  if (empty) {
+    const defaultNote = def ? ` (using default: ${def})` : '';
+    if (STRICT_MODE && !BOOTSTRAP_MODE) {
+      err(`${key} — ${description} — EMPTY${def ? ` (default available: ${def})` : ''}`);
+      errors++;
     } else {
-      if (STRICT_MODE) {
-        err(`${key} — ${description} — MISSING`);
-        errors++;
-      } else {
-        warn(`${key} — ${description} — NOT SET`);
-        warnings++;
-      }
+      warn(`${key} — ${description}${defaultNote || ' — NOT SET'}`);
+      warnings++;
     }
-  } else if (val.includes('your_') || val.includes('changeme')) {
-    err(`${key} — Contains placeholder value`);
+  } else if (isPlaceholder(val)) {
+    err(`${key} — Contains a placeholder value`);
     errors++;
   } else {
     ok(`${key} — ${description}`);
   }
 }
 
-// -- SUMMARY --
+// ── Summary ─────────────────────────────────────────────────
+const errColor  = errors   > 0 ? RED    : GREEN;
+const warnColor = warnings > 0 ? YELLOW : GREEN;
+
 console.log(`
 ${'─'.repeat(52)}
-  Errors   : ${errors > 0 ? RED : GREEN}${errors}${RESET}
-  Warnings : ${warnings > 0 ? YELLOW : GREEN}${warnings}${RESET}
-  Mode     : ${STRICT_MODE ? 'STRICT' : 'NORMAL'}
+  Errors   : ${errColor}${errors}${RESET}
+  Warnings : ${warnColor}${warnings}${RESET}
+  Mode     : ${BOLD}${MODE_LABEL.trim()}${RESET}${IS_GITHUB_ACTIONS ? `  ${DIM}(GitHub Actions)${RESET}` : ''}
 ${'─'.repeat(52)}
 `);
 
+// ── Exit ─────────────────────────────────────────────────────
 if (errors > 0) {
-  console.error(`${RED}${BOLD}❌ Validation FAILED — ${errors} error(s) found.${RESET}`);
-  console.error(`${RED}   Set the required secrets in GitHub Settings → Secrets → Actions${RESET}`);
-  console.error(`${RED}   or in your Jenkins credentials store.${RESET}\n`);
+  console.error(`${RED}${BOLD}❌ Validation FAILED — ${errors} error(s) must be fixed.${RESET}`);
+  if (!BOOTSTRAP_MODE) {
+    console.error(`\n${RED}  Where to configure secrets:${RESET}`);
+    console.error(`${RED}  • GitHub : Settings → Secrets → Actions${RESET}`);
+    console.error(`${RED}  • Jenkins: Manage Jenkins → Credentials${RESET}`);
+    console.error(`${RED}  • Local  : Edit server/.env  (copy from server/.env.example)${RESET}\n`);
+  }
   process.exit(1);
+} else if (BOOTSTRAP_MODE) {
+  console.log(`${YELLOW}${BOLD}⚡ Bootstrap check complete — ${warnings} secret(s) not yet configured.${RESET}`);
+  console.log(`${YELLOW}  Pipeline will pass until secrets are partially configured.${RESET}`);
+  console.log(`${YELLOW}  Once you add any secret, bootstrap mode deactivates automatically.${RESET}\n`);
+  // Salir con 0 en bootstrap — no bloquear el pipeline inicial
+  process.exit(0);
 } else {
-  console.log(`${GREEN}${BOLD}✅ Validation PASSED${warnings > 0 ? ` with ${warnings} warning(s)` : ''}.${RESET}\n`);
+  console.log(`${GREEN}${BOLD}✅ Validation PASSED${warnings > 0 ? ` — ${warnings} optional variable(s) not set` : ''}.${RESET}\n`);
 }

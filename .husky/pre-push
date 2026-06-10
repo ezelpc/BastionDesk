@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "✅ Validating environment variables before push..."
+npm run env:validate

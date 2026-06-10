@@ -57,7 +57,10 @@ jobs:
       - name: Validate critical secrets
         run: node scripts/validate-env.js
         env:
-          # ── Server — Infraestructura ──────────────────────────
+          # Pasamos GITHUB_ACTIONS para activar el bootstrap mode automático
+          GITHUB_ACTIONS: "true"
+
+          # ── Server vars — Infraestructura ──────────────────────────
           PORT: ${{ secrets.PORT }}
           NODE_ENV: ${{ secrets.NODE_ENV }}
 
