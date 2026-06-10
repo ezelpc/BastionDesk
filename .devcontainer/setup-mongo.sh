@@ -13,7 +13,7 @@ else
 fi
 
 # Crear directorio de datos local si se usa MongoDB local
-mkdir -p /home/vscode/.mongo/data
-mkdir -p /home/vscode/.mongo/logs
+mkdir -p /home/node/.mongo/data
+mkdir -p /home/node/.mongo/logs
 
 echo "[✓] MongoDB Ready"
