@@ -17,6 +17,9 @@ npm install -g \
     ts-node \
     nodemon \
     concurrently \
-    dotenv-cli
+    dotenv-cli \
+    bcrypt \
+    jsonwebtoken \
+    mongoose 
 
 echo "[✓] Node.js Ready"
