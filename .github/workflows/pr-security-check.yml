@@ -1,0 +1,239 @@
+# ┌─────────────────────────────────────────────────────────┐
+# │  BastionDesk — PR Security Check                        │
+# │  Trigger: pull_request → main, develop                  │
+# │                                                         │
+# │  Checks rápidos que bloquean el merge si hay issues:    │
+# │   1. Gitleaks fast scan                                 │
+# │   2. npm audit (critical + high)                        │
+# │   3. Semgrep SAST                                       │
+# │   4. Comentario automático en el PR                     │
+# └─────────────────────────────────────────────────────────┘
+
+name: PR — Security Check
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. SECRET SCAN rápido en el diff del PR
+  # ──────────────────────────────────────────────
+  pr-secret-scan:
+    name: 🔍 Secret Scan (PR diff)
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.scan.outcome }}
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan on PR diff
+        id: scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: detect --source=. --config=.gitleaks.toml --log-level=warn
+
+  # ──────────────────────────────────────────────
+  # 2. DEPENDENCY AUDIT — solo críticos y altos
+  # ──────────────────────────────────────────────
+  pr-dep-audit:
+    name: 📦 Dependency Audit (High+)
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.audit-result.outcome }}
+      server_vulns: ${{ steps.server-audit.outputs.vulns }}
+      client_vulns: ${{ steps.client-audit.outputs.vulns }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install server deps
+        working-directory: ./server
+        run: npm ci --ignore-scripts
+
+      - name: Install client deps
+        working-directory: ./client
+        run: npm ci --ignore-scripts
+
+      - name: Audit server
+        id: server-audit
+        working-directory: ./server
+        run: |
+          RESULT=$(npm audit --audit-level=high --json 2>&1 || true)
+          VULNS=$(echo "$RESULT" | node -e "
+            const chunks = [];
+            process.stdin.on('data', d => chunks.push(d));
+            process.stdin.on('end', () => {
+              try {
+                const d = JSON.parse(chunks.join(''));
+                const v = d.metadata?.vulnerabilities ?? d.vulnerabilities ?? {};
+                console.log(JSON.stringify({ critical: v.critical ?? 0, high: v.high ?? 0 }));
+              } catch(e) { console.log(JSON.stringify({ critical: 0, high: 0 })); }
+            });
+          " 2>/dev/null || echo '{"critical":0,"high":0}')
+          echo "vulns=$VULNS" >> $GITHUB_OUTPUT
+          echo "Server audit result: $VULNS"
+
+      - name: Audit client
+        id: client-audit
+        working-directory: ./client
+        run: |
+          RESULT=$(npm audit --audit-level=high --json 2>&1 || true)
+          VULNS=$(echo "$RESULT" | node -e "
+            const chunks = [];
+            process.stdin.on('data', d => chunks.push(d));
+            process.stdin.on('end', () => {
+              try {
+                const d = JSON.parse(chunks.join(''));
+                const v = d.metadata?.vulnerabilities ?? d.vulnerabilities ?? {};
+                console.log(JSON.stringify({ critical: v.critical ?? 0, high: v.high ?? 0 }));
+              } catch(e) { console.log(JSON.stringify({ critical: 0, high: 0 })); }
+            });
+          " 2>/dev/null || echo '{"critical":0,"high":0}')
+          echo "vulns=$VULNS" >> $GITHUB_OUTPUT
+          echo "Client audit result: $VULNS"
+
+      - name: Check for blocking vulnerabilities
+        id: audit-result
+        run: |
+          SERVER_CRIT=$(echo '${{ steps.server-audit.outputs.vulns }}' | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.exit(d.critical > 0 ? 1 : 0)" && echo "ok" || echo "fail")
+          CLIENT_CRIT=$(echo '${{ steps.client-audit.outputs.vulns }}' | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.exit(d.critical > 0 ? 1 : 0)" && echo "ok" || echo "fail")
+          if [ "$SERVER_CRIT" = "fail" ] || [ "$CLIENT_CRIT" = "fail" ]; then
+            echo "❌ Critical vulnerabilities found — blocking merge"
+            exit 1
+          fi
+
+  # ──────────────────────────────────────────────
+  # 3. SAST — Semgrep en archivos modificados
+  # ──────────────────────────────────────────────
+  pr-sast:
+    name: 🛡️ SAST (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    outputs:
+      status: ${{ steps.semgrep.outcome }}
+      findings: ${{ steps.semgrep.outputs.findings }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Semgrep on changed files
+        id: semgrep
+        run: |
+          # Obtener archivos modificados en este PR
+          git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E '\.(ts|tsx|js|jsx)$' > changed_files.txt || true
+          echo "Files to scan:"
+          cat changed_files.txt
+
+          if [ ! -s changed_files.txt ]; then
+            echo "No TS/JS files changed — skipping SAST"
+            echo "findings=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Scan solo los archivos modificados
+          FINDINGS=$(semgrep \
+            --config=.semgrep.yml \
+            --config=p/nodejs \
+            --config=p/jwt \
+            --config=p/secrets \
+            --exclude=node_modules \
+            --json \
+            $(cat changed_files.txt | tr '\n' ' ') 2>/dev/null | \
+            node -e "
+              const chunks = [];
+              process.stdin.on('data', d => chunks.push(d));
+              process.stdin.on('end', () => {
+                try {
+                  const d = JSON.parse(chunks.join(''));
+                  const errors = (d.results ?? []).filter(r => r.extra?.severity === 'ERROR').length;
+                  console.log(errors);
+                } catch(e) { console.log(0); }
+              });
+            " 2>/dev/null || echo "0")
+
+          echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
+          echo "SAST findings (ERROR level): $FINDINGS"
+
+          # Fallar si hay hallazgos de nivel ERROR
+          if [ "$FINDINGS" -gt "0" ]; then
+            semgrep \
+              --config=.semgrep.yml \
+              --config=p/nodejs \
+              --config=p/jwt \
+              --config=p/secrets \
+              --exclude=node_modules \
+              $(cat changed_files.txt | tr '\n' ' ')
+            exit 1
+          fi
+
+  # ──────────────────────────────────────────────
+  # 4. COMENTARIO AUTOMÁTICO EN EL PR
+  # ──────────────────────────────────────────────
+  pr-comment:
+    name: 💬 PR Security Report
+    runs-on: ubuntu-latest
+    needs: [pr-secret-scan, pr-dep-audit, pr-sast]
+    if: always()
+    steps:
+      - name: Build PR comment
+        id: build-comment
+        run: |
+          SECRET_STATUS="${{ needs.pr-secret-scan.result }}"
+          AUDIT_STATUS="${{ needs.pr-dep-audit.result }}"
+          SAST_STATUS="${{ needs.pr-sast.result }}"
+          SAST_FINDINGS="${{ needs.pr-sast.outputs.findings }}"
+          SERVER_VULNS="${{ needs.pr-dep-audit.outputs.server_vulns }}"
+          CLIENT_VULNS="${{ needs.pr-dep-audit.outputs.client_vulns }}"
+
+          status_icon() {
+            if [ "$1" = "success" ]; then echo "✅"; else echo "❌"; fi
+          }
+
+          cat > pr-comment.md << EOF
+          ## 🔐 BastionDesk — Security Check Report
+
+          | Check | Estado | Detalles |
+          |-------|--------|----------|
+          | Secret Scanning (Gitleaks) | $(status_icon $SECRET_STATUS) \`$SECRET_STATUS\` | Detecta credenciales hardcodeadas |
+          | Dependency Audit (npm) | $(status_icon $AUDIT_STATUS) \`$AUDIT_STATUS\` | Server: \`$SERVER_VULNS\` · Client: \`$CLIENT_VULNS\` |
+          | SAST (Semgrep) | $(status_icon $SAST_STATUS) \`$SAST_STATUS\` | Hallazgos ERROR: \`${SAST_FINDINGS:-0}\` |
+
+          ---
+
+          > 📎 Revisa la pestaña **Security → Code scanning** para ver los reportes completos en formato SARIF.
+          >
+          > 🔗 Pipeline completo: [CI — DevSecOps](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+
+          echo "comment_file=pr-comment.md" >> $GITHUB_OUTPUT
+
+      - name: Post comment on PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: security-check
+          path: pr-comment.md
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

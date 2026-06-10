@@ -16,7 +16,11 @@
     "sec:scan:container": "trivy image --exit-code 0 $(docker inspect --format='{{.Image}}' bastiondesk-dev 2>/dev/null || echo 'bastiondesk-dev') 2>/dev/null || echo '[!] Container not running — skipping image scan'",
     "sec:scan": "concurrently --names \"SECRETS,SAST,DEPS\" --prefix-colors \"red,yellow,blue\" \"npm run sec:scan:secrets\" \"npm run sec:scan:sast\" \"npm run sec:scan:deps\"",
     "sec:audit": "npm audit --audit-level=moderate",
-    "sec:audit:fix": "npm audit fix"
+    "sec:audit:fix": "npm audit fix",
+
+    "env:validate": "node scripts/validate-env.js",
+    "env:validate:strict": "cross-env STRICT_MODE=true node scripts/validate-env.js",
+    "env:setup": "cp -n server/.env.example server/.env 2>/dev/null || true && cp -n client/.env.example client/.env 2>/dev/null || true && echo '✅ .env files created — edit them with your values'"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

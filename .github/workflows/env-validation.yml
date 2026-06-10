@@ -1,0 +1,296 @@
+# ┌─────────────────────────────────────────────────────────┐
+# │  BastionDesk — Environment Variables Validation         │
+# │  Triggers:                                              │
+# │   - push → main                                         │
+# │   - workflow_dispatch (ejecución manual)                │
+# │   - schedule: todos los lunes 8:00 AM UTC               │
+# │                                                         │
+# │  Verifica:                                              │
+# │   ✅ Todos los secrets requeridos están configurados    │
+# │   ✅ Los valores tienen el formato correcto             │
+# │   ✅ .env.example está sincronizado con los reqs        │
+# │   ✅ No hay valores placeholder ("your_*_here")         │
+# └─────────────────────────────────────────────────────────┘
+
+name: ENV — Variable Validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/.env.example"
+      - "client/.env.example"
+      - "scripts/validate-env.js"
+      - ".github/workflows/env-validation.yml"
+  schedule:
+    - cron: "0 8 * * 1"  # Todos los lunes a las 8AM UTC
+  workflow_dispatch:
+    inputs:
+      strict_mode:
+        description: "Modo estricto — falla si CUALQUIER variable está vacía"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  # ──────────────────────────────────────────────
+  # VALIDACIÓN DE VARIABLES CRÍTICAS
+  # ──────────────────────────────────────────────
+  validate-required:
+    name: ✅ Validate Required Secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate critical secrets
+        run: node scripts/validate-env.js
+        env:
+          # ── Server — Infraestructura ──────────────────────────
+          PORT: ${{ secrets.PORT }}
+          NODE_ENV: ${{ secrets.NODE_ENV }}
+
+          # ── Base de datos ─────────────────────────────────────
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_URI_TEST: ${{ secrets.MONGODB_URI_TEST }}
+
+          # ── Autenticación JWT ─────────────────────────────────
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_EXPIRES_IN: ${{ secrets.JWT_EXPIRES_IN }}
+          JWT_REFRESH_SECRET: ${{ secrets.JWT_REFRESH_SECRET }}
+          JWT_REFRESH_EXPIRES_IN: ${{ secrets.JWT_REFRESH_EXPIRES_IN }}
+
+          # ── Email (Resend) ────────────────────────────────────
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+
+          # ── SMS (Twilio) ──────────────────────────────────────
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
+
+          # ── Google Maps ───────────────────────────────────────
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+
+          # ── Cloudinary ────────────────────────────────────────
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+
+          # ── CORS ──────────────────────────────────────────────
+          CLIENT_URL: ${{ secrets.CLIENT_URL }}
+
+          # ── Client ────────────────────────────────────────────
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_GOOGLE_MAPS_KEY: ${{ secrets.VITE_GOOGLE_MAPS_KEY }}
+
+          # ── Control de modo ───────────────────────────────────
+          STRICT_MODE: ${{ inputs.strict_mode || 'false' }}
+
+      - name: Check .env.example completeness
+        run: |
+          node -e "
+          const fs = require('fs');
+
+          const REQUIRED_SERVER = [
+            'PORT', 'NODE_ENV',
+            'MONGODB_URI', 'MONGODB_URI_TEST',
+            'JWT_SECRET', 'JWT_EXPIRES_IN', 'JWT_REFRESH_SECRET', 'JWT_REFRESH_EXPIRES_IN',
+            'RESEND_API_KEY',
+            'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER',
+            'GOOGLE_MAPS_API_KEY',
+            'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET',
+            'CLIENT_URL'
+          ];
+
+          const REQUIRED_CLIENT = [
+            'VITE_API_URL',
+            'VITE_GOOGLE_MAPS_KEY'
+          ];
+
+          function parseEnvKeys(path) {
+            const content = fs.readFileSync(path, 'utf8');
+            return content
+              .split('\n')
+              .filter(l => l.trim() && !l.startsWith('#'))
+              .map(l => l.split('=')[0].trim())
+              .filter(Boolean);
+          }
+
+          let hasError = false;
+
+          // Validate server/.env.example
+          const serverKeys = parseEnvKeys('server/.env.example');
+          const missingServer = REQUIRED_SERVER.filter(k => !serverKeys.includes(k));
+          if (missingServer.length > 0) {
+            console.error('❌ Missing keys in server/.env.example:', missingServer.join(', '));
+            hasError = true;
+          } else {
+            console.log('✅ server/.env.example is complete');
+          }
+
+          // Validate client/.env.example
+          try {
+            const clientKeys = parseEnvKeys('client/.env.example');
+            const missingClient = REQUIRED_CLIENT.filter(k => !clientKeys.includes(k));
+            if (missingClient.length > 0) {
+              console.error('❌ Missing keys in client/.env.example:', missingClient.join(', '));
+              hasError = true;
+            } else {
+              console.log('✅ client/.env.example is complete');
+            }
+          } catch(e) {
+            console.warn('⚠️  client/.env.example not found — creating check skipped');
+          }
+
+          if (hasError) process.exit(1);
+          console.log('');
+          console.log('📋 All .env.example files are complete and up to date');
+          "
+
+  # ──────────────────────────────────────────────
+  # VALIDACIÓN DE FORMATO DE VARIABLES
+  # ──────────────────────────────────────────────
+  validate-format:
+    name: 🔎 Validate Variable Formats
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Validate variable formats
+        run: |
+          node -e "
+          let errors = [];
+          let warnings = [];
+
+          function check(name, value, validator, message) {
+            if (!value) {
+              warnings.push('[WARN] \${name} is empty — skipping format check');
+              return;
+            }
+            if (!validator(value)) {
+              errors.push('[ERROR] \${name}: \${message} (got: \${value.substring(0, 20)}...)');
+            } else {
+              console.log('[OK] \${name} format is valid');
+            }
+          }
+
+          // JWT_SECRET debe tener al menos 32 caracteres
+          check(
+            'JWT_SECRET',
+            process.env.JWT_SECRET,
+            v => v.length >= 32,
+            'Must be at least 32 characters long for security'
+          );
+
+          // JWT_REFRESH_SECRET debe tener al menos 32 caracteres
+          check(
+            'JWT_REFRESH_SECRET',
+            process.env.JWT_REFRESH_SECRET,
+            v => v.length >= 32,
+            'Must be at least 32 characters long for security'
+          );
+
+          // MONGODB_URI debe empezar con mongodb:// o mongodb+srv://
+          check(
+            'MONGODB_URI',
+            process.env.MONGODB_URI,
+            v => /^mongodb(\+srv)?:\/\/.+/.test(v),
+            'Must start with mongodb:// or mongodb+srv://'
+          );
+
+          // PORT debe ser un número
+          check(
+            'PORT',
+            process.env.PORT,
+            v => /^\d+\$/.test(v) && parseInt(v) > 0 && parseInt(v) < 65536,
+            'Must be a valid port number (1-65535)'
+          );
+
+          // JWT_EXPIRES_IN formato válido
+          check(
+            'JWT_EXPIRES_IN',
+            process.env.JWT_EXPIRES_IN,
+            v => /^\d+[smhd]\$/.test(v),
+            'Must be a valid time format (e.g. 7d, 24h, 3600s)'
+          );
+
+          // CLOUDINARY_CLOUD_NAME no debe tener espacios
+          check(
+            'CLOUDINARY_CLOUD_NAME',
+            process.env.CLOUDINARY_CLOUD_NAME,
+            v => !/\s/.test(v),
+            'Must not contain spaces'
+          );
+
+          // RESEND_API_KEY debe empezar con re_
+          check(
+            'RESEND_API_KEY',
+            process.env.RESEND_API_KEY,
+            v => v.startsWith('re_'),
+            'Must start with re_ (Resend API key format)'
+          );
+
+          // TWILIO_ACCOUNT_SID debe empezar con AC
+          check(
+            'TWILIO_ACCOUNT_SID',
+            process.env.TWILIO_ACCOUNT_SID,
+            v => v.startsWith('AC'),
+            'Must start with AC (Twilio Account SID format)'
+          );
+
+          // CLIENT_URL debe ser una URL válida
+          check(
+            'CLIENT_URL',
+            process.env.CLIENT_URL,
+            v => { try { new URL(v); return true; } catch(e) { return false; } },
+            'Must be a valid URL'
+          );
+
+          // No debe haber valores placeholder
+          const placeholderVars = Object.entries(process.env)
+            .filter(([k, v]) => v && /your_.*_here|changeme|placeholder|example\.com/i.test(v))
+            .filter(([k]) => ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'MONGODB_URI', 'RESEND_API_KEY', 'TWILIO_AUTH_TOKEN'].includes(k));
+
+          if (placeholderVars.length > 0) {
+            placeholderVars.forEach(([k]) => errors.push('[ERROR] \${k} contains a placeholder value — replace it with a real secret'));
+          }
+
+          // Output
+          warnings.forEach(w => console.warn(w));
+          if (errors.length > 0) {
+            console.error('');
+            errors.forEach(e => console.error(e));
+            console.error('');
+            console.error('\u274c Format validation failed — fix the above errors');
+            process.exit(1);
+          }
+          console.log('');
+          console.log('\u2705 All variable formats are valid');
+          "
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          JWT_REFRESH_SECRET: ${{ secrets.JWT_REFRESH_SECRET }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          PORT: ${{ secrets.PORT || '5000' }}
+          JWT_EXPIRES_IN: ${{ secrets.JWT_EXPIRES_IN || '7d' }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          CLIENT_URL: ${{ secrets.CLIENT_URL || 'http://localhost:3000' }}
