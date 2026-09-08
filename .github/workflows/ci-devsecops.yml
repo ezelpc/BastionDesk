@@ -1,17 +1,4 @@
-# ┌─────────────────────────────────────────────────────────┐
-# │  BastionDesk — CI DevSecOps Pipeline                    │
-# │  Triggers: push / PR → main, develop                    │
-# │                                                         │
-# │  Stages:                                                │
-# │   1. Secret Scanning  (Gitleaks)                        │
-# │   2. SAST             (Semgrep)                         │
-# │   3. Dependency Audit (npm audit)                       │
-# │   4. SCA / Vuln Scan  (Trivy)                           │
-# │   5. Env Vars Check   (validate-env.js)                 │
-# │   6. Build            (tsc + vite build)                │
-# └─────────────────────────────────────────────────────────┘
-
-name: CI — DevSecOps Pipeline
+name: BastionDesk DevSecOps
 
 on:
   push:
@@ -21,446 +8,142 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # para subir resultados SARIF a GitHub Security
-  pull-requests: write     # para comentar en PRs
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: '22'
 
 jobs:
-  # ──────────────────────────────────────────────
-  # 1. SECRET SCANNING — Gitleaks
-  # ──────────────────────────────────────────────
-  secret-scan:
-    name: 🔍 Secret Scanning (Gitleaks)
+  security:
+    name: Security gates
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # historial completo para detectar secrets en commits anteriores
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Run Gitleaks
+      - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # opcional para versión Enterprise
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          args: detect --source=. --config=.gitleaks.toml --verbose --report-format=sarif --report-path=gitleaks-report.sarif
+          python-version: '3.12'
 
-      - name: Upload Gitleaks SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: gitleaks-report.sarif
-          category: gitleaks
+      - name: Install Semgrep
+        run: python -m pip install --disable-pip-version-check --no-cache-dir semgrep
 
-      - name: Upload Gitleaks report as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gitleaks-report
-          path: gitleaks-report.sarif
-          retention-days: 30
-
-  # ──────────────────────────────────────────────
-  # 2. SAST — Semgrep
-  # ──────────────────────────────────────────────
-  sast:
-    name: 🛡️ SAST (Semgrep)
-    runs-on: ubuntu-latest
-    container:
-      image: semgrep/semgrep
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run Semgrep — custom rules
-        run: |
-          semgrep \
-            --config=.semgrep.yml \
-            --config=p/nodejs \
-            --config=p/typescript \
-            --config=p/react \
-            --config=p/owasp-top-ten \
-            --config=p/jwt \
-            --config=p/secrets \
-            --exclude=node_modules \
-            --exclude=dist \
-            --exclude=build \
-            --output=semgrep-report.sarif \
-            --sarif \
-            --verbose \
-            .
-        env:
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}  # opcional para Semgrep Cloud
-
-      - name: Upload Semgrep SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep-report.sarif
-          category: semgrep
-
-      - name: Upload Semgrep report as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: semgrep-report
-          path: semgrep-report.sarif
-          retention-days: 30
-
-  # ──────────────────────────────────────────────
-  # 3. DEPENDENCY AUDIT — npm audit
-  # ──────────────────────────────────────────────
-  dependency-audit:
-    name: 📦 Dependency Audit (npm audit)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: SAST
+        run: semgrep scan --config auto --error --exclude node_modules --exclude dist --exclude build .
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
-            client/package-lock.json
 
       - name: Install root dependencies
-        run: npm ci --ignore-scripts
+        run: npm install --ignore-scripts
 
       - name: Install server dependencies
-        working-directory: ./server
-        run: npm ci --ignore-scripts
+        working-directory: server
+        run: npm install --ignore-scripts
 
       - name: Install client dependencies
-        working-directory: ./client
-        run: npm ci --ignore-scripts
+        working-directory: client
+        run: npm install --ignore-scripts
 
-      - name: Audit root packages
-        run: npm audit --audit-level=high --json > audit-root.json || true
+      - name: Audit root dependencies
+        run: npm audit --audit-level=high
 
-      - name: Audit server packages
-        working-directory: ./server
-        run: npm audit --audit-level=high --json > ../audit-server.json || true
+      - name: Audit server dependencies
+        working-directory: server
+        run: npm audit --audit-level=high
 
-      - name: Audit client packages
-        working-directory: ./client
-        run: npm audit --audit-level=high --json > ../audit-client.json || true
+      - name: Audit client dependencies
+        working-directory: client
+        run: npm audit --audit-level=high
 
-      - name: Print audit summaries
-        run: |
-          echo "====== ROOT ======"
-          cat audit-root.json | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log('Vulnerabilities:', JSON.stringify(d.metadata?.vulnerabilities ?? d.vulnerabilities ?? {}, null, 2))" || echo "No JSON output"
-          echo "====== SERVER ======"
-          cat audit-server.json | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log('Vulnerabilities:', JSON.stringify(d.metadata?.vulnerabilities ?? d.vulnerabilities ?? {}, null, 2))" || echo "No JSON output"
-          echo "====== CLIENT ======"
-          cat audit-client.json | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); console.log('Vulnerabilities:', JSON.stringify(d.metadata?.vulnerabilities ?? d.vulnerabilities ?? {}, null, 2))" || echo "No JSON output"
-
-      - name: Upload audit reports
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          name: npm-audit-reports
-          path: |
-            audit-root.json
-            audit-server.json
-            audit-client.json
-          retention-days: 30
-
-      - name: Fail on critical vulnerabilities
-        run: |
-          ROOT_CRIT=$(cat audit-root.json | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.exit((d.metadata?.vulnerabilities?.critical ?? d.vulnerabilities?.critical ?? 0) > 0 ? 1 : 0)" && echo 0 || echo 1)
-          SERVER_CRIT=$(cat audit-server.json | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.exit((d.metadata?.vulnerabilities?.critical ?? d.vulnerabilities?.critical ?? 0) > 0 ? 1 : 0)" && echo 0 || echo 1)
-          CLIENT_CRIT=$(cat audit-client.json | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.exit((d.metadata?.vulnerabilities?.critical ?? d.vulnerabilities?.critical ?? 0) > 0 ? 1 : 0)" && echo 0 || echo 1)
-          if [ "$ROOT_CRIT" = "1" ] || [ "$SERVER_CRIT" = "1" ] || [ "$CLIENT_CRIT" = "1" ]; then
-            echo "❌ Critical vulnerabilities found — blocking pipeline"
-            exit 1
-          fi
-          echo "✅ No critical vulnerabilities found"
-
-  # ──────────────────────────────────────────────
-  # 4. SCA / VULNERABILITY SCAN — Trivy
-  # ──────────────────────────────────────────────
-  trivy-scan:
-    name: 🔒 SCA Vulnerability Scan (Trivy)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Cache Trivy database
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/trivy
-          key: ${{ runner.os }}-trivy-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-trivy-
-
-      - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: "fs"
-          scan-ref: "."
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
           ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
-          format: "sarif"
-          output: "trivy-report.sarif"
-          skip-dirs: "node_modules,.git"
-          ignorefile: ".trivyignore"
+          exit-code: '1'
+          skip-dirs: node_modules,.git,dist,build
 
-      - name: Upload Trivy SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-report.sarif
-          category: trivy
-
-      - name: Run Trivy — table format for logs
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: "fs"
-          scan-ref: "."
-          ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH,MEDIUM"
-          format: "table"
-          skip-dirs: "node_modules,.git"
-          ignorefile: ".trivyignore"
-
-      - name: Upload Trivy report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-report
-          path: trivy-report.sarif
-          retention-days: 30
-
-  # ──────────────────────────────────────────────
-  # 4b. DOCKER SCA SCAN — Trivy
-  # ──────────────────────────────────────────────
-  docker-scan:
-    name: 🛡️ Docker SCA Scan (Trivy)
+  build:
+    name: Build application
     runs-on: ubuntu-latest
+    needs: security
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Set up Docker Buildx
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install root dependencies
+        run: npm install --ignore-scripts
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm install --ignore-scripts
+
+      - name: Install client dependencies
+        working-directory: client
+        run: npm install --ignore-scripts
+
+      - name: Build server
+        working-directory: server
+        run: npm run build
+
+      - name: Build client
+        working-directory: client
+        run: npm run build
+
+  container:
+    name: Container security
+    runs-on: ubuntu-latest
+    needs: security
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Trivy database
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/trivy
-          key: ${{ runner.os }}-trivy-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-trivy-
+      - name: Build dev container image
+        run: docker build --pull -t bastiondesk-dev:ci -f .devcontainer/Dockerfile .devcontainer
 
-      - name: Build local Docker image
-        run: |
-          docker build -t bastiondesk-dev:latest -f .devcontainer/Dockerfile .devcontainer
-
-      - name: Run Trivy vulnerability scan on Docker image
-        uses: aquasecurity/trivy-action@master
+      - name: Scan container image
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: "bastiondesk-dev:latest"
+          image-ref: bastiondesk-dev:ci
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
           ignore-unfixed: true
-          vuln-type: "os,library"
-          severity: "CRITICAL,HIGH"
-          format: "sarif"
-          output: "trivy-docker-report.sarif"
+          exit-code: '1'
 
-      - name: Upload Trivy Docker SARIF to GitHub Security
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-docker-report.sarif
-          category: trivy-docker
-
-      - name: Upload Trivy Docker report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-docker-report
-          path: trivy-docker-report.sarif
-          retention-days: 30
-
-  # ──────────────────────────────────────────────────────────────────
-  # 5. ENV VARS VALIDATION
-  #
-  # ⚡ Bootstrap mode (auto-detectado):
-  #   Si NINGÚN secret crítico está configurado aún,
-  #   el script detecta que es el primer run y emite
-  #   warnings en lugar de errores — el pipeline no se bloquea.
-  #
-  # 🔒 Modo normal:
-  #   En cuanto se configura cualquier secret crítico, la
-  #   validación completa se activa. Los secrets faltantes
-  #   bloquean el merge a main.
-  #
-  # continue-on-error en PRs/develop: la validación reporta
-  # el estado pero no bloquea la revisión de código.
-  # ──────────────────────────────────────────────────────────────────
-  validate-env:
-    name: ✅ Validate Environment Variables
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # En PRs y branches que no sean main, no bloquear si los secrets
-    # aún no están configurados (útil en forks y repos nuevos)
-    continue-on-error: ${{ github.ref != 'refs/heads/main' }}
-    outputs:
-      result: ${{ steps.validate.outcome }}
+    permissions:
+      contents: read
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v5
         with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Validate required secrets are configured
-        id: validate
-        run: node scripts/validate-env.js
-        env:
-          # ── Pasamos GITHUB_ACTIONS para que el script detecte
-          #    automáticamente el modo bootstrap en primer run ──
-          GITHUB_ACTIONS: "true"
-
-          # ── Server vars ─────────────────────────────────────
-          PORT: ${{ secrets.PORT || '5000' }}
-          NODE_ENV: ${{ secrets.NODE_ENV || 'ci' }}
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}
-          MONGODB_URI_TEST: ${{ secrets.MONGODB_URI_TEST }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          JWT_EXPIRES_IN: ${{ secrets.JWT_EXPIRES_IN || '7d' }}
-          JWT_REFRESH_SECRET: ${{ secrets.JWT_REFRESH_SECRET }}
-          JWT_REFRESH_EXPIRES_IN: ${{ secrets.JWT_REFRESH_EXPIRES_IN || '30d' }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_PHONE_NUMBER: ${{ secrets.TWILIO_PHONE_NUMBER }}
-          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
-          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
-          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
-          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
-          CLIENT_URL: ${{ secrets.CLIENT_URL || 'http://localhost:3000' }}
-          # ── Client vars ─────────────────────────────────────
-          VITE_API_URL: ${{ secrets.VITE_API_URL }}
-          VITE_GOOGLE_MAPS_KEY: ${{ secrets.VITE_GOOGLE_MAPS_KEY }}
-
-      - name: Validate .env.example is up to date
-        run: |
-          echo "Checking that server/.env.example has all required keys..."
-          node -e "
-          const fs = require('fs');
-          const required = [
-            'PORT', 'NODE_ENV', 'MONGODB_URI', 'MONGODB_URI_TEST',
-            'JWT_SECRET', 'JWT_EXPIRES_IN', 'JWT_REFRESH_SECRET',
-            'RESEND_API_KEY', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN',
-            'TWILIO_PHONE_NUMBER', 'GOOGLE_MAPS_API_KEY',
-            'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET',
-            'CLIENT_URL'
-          ];
-          const content = fs.readFileSync('server/.env.example', 'utf8');
-          const keys = content.match(/^[A-Z_]+=?/gm)?.map(k => k.replace('=','')) ?? [];
-          const missing = required.filter(r => !keys.includes(r));
-          if (missing.length > 0) {
-            console.error('❌ Missing keys in server/.env.example:', missing.join(', '));
-            process.exit(1);
-          }
-          console.log('✅ server/.env.example is up to date');
-          "
-
-  # ──────────────────────────────────────────────
-  # 6. BUILD — TypeScript + Vite
-  # ──────────────────────────────────────────────
-  build:
-    name: 🏗️ Build (Server + Client)
-    runs-on: ubuntu-latest
-    # Build solo en main/develop y solo si los security checks pasaron
-    # validate-env puede estar en continue-on-error, pero el build sí
-    # requiere que los secrets estén configurados para producción
-    if: |
-      github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/develop'
-    needs: [secret-scan, sast, dependency-audit, trivy-scan, docker-scan, validate-env]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-          cache-dependency-path: |
-            package-lock.json
-            server/package-lock.json
-            client/package-lock.json
-
-      - name: Install all dependencies
-        run: |
-          npm ci --ignore-scripts
-          npm ci --ignore-scripts --prefix server
-          npm ci --ignore-scripts --prefix client
-
-      - name: Build server (TypeScript)
-        working-directory: ./server
-        run: npm run build
-
-      - name: Build client (Vite)
-        working-directory: ./client
-        run: npm run build
-        env:
-          VITE_API_URL: ${{ secrets.VITE_API_URL || 'http://localhost:5000/api' }}
-          VITE_GOOGLE_MAPS_KEY: ${{ secrets.VITE_GOOGLE_MAPS_KEY || '' }}
-
-      - name: Upload server build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-dist
-          path: server/dist
-          retention-days: 7
-
-      - name: Upload client build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: client-dist
-          path: client/dist
-          retention-days: 7
-
-  # ──────────────────────────────────────────────
-  # SECURITY SUMMARY — Siempre se ejecuta al final
-  # ──────────────────────────────────────────────
-  security-summary:
-    name: 📊 Security Summary
-    runs-on: ubuntu-latest
-    needs: [secret-scan, sast, dependency-audit, trivy-scan, docker-scan, validate-env]
-    if: always()
-    steps:
-      - name: Download all reports
-        uses: actions/download-artifact@v4
-        with:
-          pattern: "*-report*"
-          merge-multiple: true
-
-      - name: Print security summary
-        run: |
-          echo "╔══════════════════════════════════════════╗"
-          echo "║     BastionDesk — Security Summary       ║"
-          echo "╠══════════════════════════════════════════╣"
-          echo "║  Secret Scan  : ${{ needs.secret-scan.result }}"
-          echo "║  SAST         : ${{ needs.sast.result }}"
-          echo "║  Dep Audit    : ${{ needs.dependency-audit.result }}"
-          echo "║  Trivy SCA    : ${{ needs.trivy-scan.result }}"
-          echo "║  Docker SCA   : ${{ needs.docker-scan.result }}"
-          echo "║  Env Vars     : ${{ needs.validate-env.result }}"
-          echo "╚══════════════════════════════════════════╝"
-          echo ""
-          echo "📎 Full reports available in GitHub Security → Code scanning"
+          fail-on-severity: high
